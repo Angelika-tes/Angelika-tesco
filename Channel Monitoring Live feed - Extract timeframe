@@ -1,0 +1,85 @@
+WITH datasources AS (
+        SELECT '1'::text AS table_name,
+           a.site_id,
+           a.name,
+           a.repository_url,
+           b.datasource_id,
+           a.id AS published_datasource_id,
+           a.connectable AS published,
+           c.parent_workbook_id AS workbook_id
+          FROM public.datasources a
+            LEFT JOIN public.data_connections b ON a.repository_url::text = b.dbname::text 
+            LEFT JOIN public.datasources c on b.datasource_id=c.id 
+         WHERE a.connectable is true 
+           UNION ALL
+        SELECT '2'::text AS table_name,
+           datasources.site_id,
+           datasources.name,
+           datasources.repository_url,
+           datasources.id AS datasource_id,
+           NULL::integer AS published_datasource_id,
+           datasources.connectable AS published,
+           datasources.parent_workbook_id AS workbook_id
+          FROM public.datasources
+         WHERE public.datasources.connectable is false
+       ),
+        
+       deduping_datasources AS (
+        SELECT datasources.site_id,
+           datasources.name,
+           datasources.repository_url,
+           datasources.datasource_id,
+           datasources.published_datasource_id,
+           datasources.published,
+           datasources.workbook_id,
+           case when datasources.workbook_id is null then 1 else 
+           row_number() OVER (PARTITION BY datasources.site_id, datasources.datasource_id, datasources.workbook_id ORDER BY datasources.table_name asc) end AS keep
+          FROM datasources
+       ),
+    
+all_datasources as (   
+        
+SELECT  
+   a.published_datasource_id,--I am using this ID instead of datasource Id cause this is matching/ joining with what Ihave in Dataset table in tableau
+   a.datasource_id,
+   a.published, 
+   a.workbook_id
+  FROM deduping_datasources a
+  left join public.projects_contents b on a.datasource_id=content_id and a.site_id=b.site_id and b.content_type = 'datasource'
+  left join public.projects_contents c on a.published_datasource_id=c.content_id and a.site_id=c.site_id and c.content_type = 'datasource'
+ WHERE a.keep = 1  and a.site_id = 96 and  coalesce(b.project_id,c.project_id) in (1682,2348,1961,2371)
+ 
+),
+
+
+ timeframe as (
+select distinct 
+			a.started_at, 
+			a.completed_at, 
+a.created_at,
+date_part('epoch'::text, a.completed_at - a.started_at)::integer AS run_time,
+case 
+when LENGTH(SPLIT_PART(SPLIT_PART(a.args::text,'Datasource',2),'- ',2)) > 0 then SPLIT_PART(SPLIT_PART(a.args::text,'Datasource',2),'- ',2)
+end as datasource_id
+from public.background_jobs a
+left join public.tasks b on a.task_id=b.id
+where a.job_name in ('Increment Extracts','Refresh Extracts') and   a.site_id=96  and date(a.created_at)=CURRENT_DATE and case 
+when LENGTH(SPLIT_PART(SPLIT_PART(a.args::text,'Datasource',2),'- ',2)) > 0 then SPLIT_PART(SPLIT_PART(a.args::text,'Datasource',2),'- ',2)
+end is not null )  ------ Added the cte just for the 'Timeframe'  feed. Added by Angelika. 
+
+
+
+select  
+
+a.published_datasource_id::int as datasource_id,headers,dates,run_time
+from all_datasources a
+full join 
+
+(select distinct datasource_id::int,'started_at' as headers, started_at as dates,run_time from timeframe where  date(created_at)=CURRENT_DATE 
+union all
+select distinct datasource_id::int,'completed_at' as headers,completed_at as dates, run_time from timeframe where  date(created_at)=CURRENT_DATE )
+
+
+
+
+c on c.datasource_id::int=a.published_datasource_id::int ---- Added just for the SLO feed. Added by Angelika.
