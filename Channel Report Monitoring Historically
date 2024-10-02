@@ -1,0 +1,201 @@
+WITH RECURSIVE project_hierarchy AS (
+SELECT
+        p.site_id                       AS site_id ,
+        s.name                          AS site_name ,
+        p.name                          AS project_name ,
+        p.id                            AS project_id ,
+        p.parent_project_id ,
+        CAST(NULL as varchar)           AS parent_project_name ,
+        0                               AS project_level ,
+        p.name                          AS top_level_project_name ,
+        p.id                            AS top_level_project_id 
+
+    FROM public.projects p
+        LEFT JOIN public.users u
+            ON p.owner_id = u.id
+        LEFT JOIN public.system_users su
+            ON u.system_user_id = su.id
+        LEFT JOIN public.sites s on p.site_id = s.id 
+    WHERE p.parent_project_id is null and  p.site_id=96 AND  p.id IN (1682,2348,1961,2371)
+    UNION ALL
+    SELECT
+        p.site_id                       AS site_id ,
+        s.name                          AS site_name ,
+        p.name                          AS project_name ,
+        p.id                            AS project_id ,
+        p.parent_project_id ,
+        ph.project_name                 AS parent_project_name ,
+        ph.project_level + 1            AS project_level ,
+        ph.top_level_project_name            AS top_level_project_name ,
+        ph.top_level_project_id           AS top_level_project_id 
+    FROM public.projects p
+        LEFT JOIN public.users u
+            ON p.owner_id = u.id
+        LEFT JOIN public.system_users su
+            ON u.system_user_id = su.id
+        LEFT JOIN public.sites s on p.site_id=s.id
+        INNER JOIN project_hierarchy ph
+            ON ph.project_id = p.parent_project_id 
+			 WHERE p.parent_project_id is null and  p.site_id=96 AND  p.id IN (1682,2348,1961,2371)),
+			
+datasources AS (
+        SELECT '1'::text AS table_name,
+           a.site_id,
+           a.name,
+           a.repository_url,
+           b.datasource_id,
+           a.id AS published_datasource_id,
+           a.connectable AS published,
+           b.owner_id AS workbook_id
+          FROM public.datasources a
+            LEFT JOIN public.data_connections b ON a.repository_url::text = b.dbname::text
+         WHERE a.connectable is true
+       UNION ALL
+        SELECT '2'::text AS table_name,
+           datasources.site_id,
+           datasources.name,
+           datasources.repository_url,
+           datasources.id AS datasource_id,
+           NULL::integer AS published_datasource_id,
+           datasources.connectable AS published,
+           datasources.parent_workbook_id AS workbook_id
+          FROM public.datasources
+         WHERE public.datasources.connectable is false
+       ),
+        
+       deduping_datasources AS (
+        SELECT datasources.site_id,
+           datasources.name,
+           datasources.repository_url,
+           datasources.datasource_id,
+           datasources.published_datasource_id,
+           datasources.published,
+           datasources.workbook_id,
+           row_number() OVER (PARTITION BY datasources.site_id, datasources.datasource_id, datasources.workbook_id ORDER BY datasources.table_name) AS keep
+          FROM datasources
+       ),
+    
+all_datasources as (   
+        
+SELECT a.site_id,
+   a.name,
+   a.repository_url,
+   coalesce(b.project_id,c.project_id) as project_id,   
+   a.published_datasource_id,
+   a.datasource_id,
+   a.published,
+   a.workbook_id
+  FROM deduping_datasources a
+  left join public.projects_contents b on a.datasource_id=content_id and b.content_type = 'datasource'
+  left join public.projects_contents c on a.published_datasource_id=c.content_id and c.content_type = 'datasource'
+ WHERE a.keep = 1  AND a.site_id=96
+ 
+),
+
+--views
+users as (
+select 
+a.id as user_id,
+b.name, 
+a.site_id
+from public.users a
+left join public.system_users b on a.system_user_id=b.id),
+
+
+
+------------------------
+
+details as (
+select current_date-1 as max_date,a.is_failure,
+case when b.name = ('Access View') then 'historical_views' when b.name=('Refresh Data Source Extract') then 'Refresh Datasource Extract'  end as type,
+a.id,
+a.created_at as executed_at_datetime,
+a.created_at::date as executed_at_date,
+c.user_id as user_id,
+
+case when b.name = 'Refresh Data Source Extract' then xx.workbook_id  else g.workbook_id end as workbook_id,
+y.name as workbook_name,
+l.view_id as dashboard_id,
+z.name as dashboard_name,
+    h.datasource_id,
+x.name as datasource_name, 
+e.site_id as site_id,
+f.project_id as project_id,
+f.name as project_name,
+lower(k.name) as sam_account_name,
+null as render_time,
+'' as vizql_session,
+'' as device_split
+from public.historical_events a
+left join public.historical_event_types b on a.historical_event_type_id=b.type_id
+left join public.hist_users c on a.hist_actor_user_id=c.id
+left join public.hist_groups d on a.hist_group_id=d.id
+left join public.hist_sites e on a.hist_target_site_id=e.id
+left join public.hist_projects f on a.hist_project_id=f.id
+left join public.hist_workbooks g on a.hist_workbook_id=g.id
+    left join public.workbooks y on g.workbook_id=y.id
+
+left join public.hist_datasources h on a.hist_datasource_id=h.id
+    left join public.datasources x on h.datasource_id=x.id
+
+left join public.hist_tasks i on a.hist_task_id=i.id
+left join public.tasks j on i.task_id=j.id
+left join public.hist_views l on a.hist_view_id=l.id
+    left join public.views z on l.view_id=z.id
+left join all_datasources xx on x.id=coalesce(xx.published_datasource_id,xx.datasource_id)
+
+
+left join public.system_users k on c.system_user_id=k.id
+where b.name in ('Access View','Refresh Data Source Extract')
+and  e.site_id=96 AND f.project_id IN (1682,2348,1961,2371)
+and  date(a.created_at)=current_date
+    
+    
+union all
+    
+    
+select current_date-1 as max_date, null as is_failure,
+'http_views' as type,
+a.id,
+a.created_at as executed_at_datetime,
+a.created_at::date as executed_at_date,
+a.user_id,
+b.workbook_id,
+c.name as workbook_name,
+b.id as dashboard_id,
+b.name as dashboard_name,
+   null as datasource_id,
+    '' as datasource_name,
+a.site_id,
+c.project_id,
+d.name as project_name,
+lower(f.name) as sam_account_name,
+extract(epoch from (a.completed_at::timestamp - a.created_at::timestamp)) as render_time,
+vizql_session,
+case 
+when LOWER(a.http_user_agent) like '%ipad%' or LOWER(a.http_user_agent) like '%tablet%' THEN 'Tablet'
+when LOWER(a.http_user_agent) like '%iphone%'  THEN 'Iphone'
+when LOWER(a.http_user_agent) like '%android%'  THEN 'Android'
+when  LOWER(a.http_user_agent) like '%windows%' or LOWER(a.http_user_agent) like '%mac%' or LOWER(a.http_user_agent) like '%X11; %'THEN 'Desktop'
+ELSE 'other'
+END as device_split
+from public.http_requests a
+join public.views b on a.currentsheet = replace(b.repository_url,'/sheets','') and a.site_id=b.site_id
+left join public.workbooks c on b.workbook_id=c.id
+left join public.projects d on c.project_id=d.id
+left join public.users e on a.user_id=e.id
+left join public.system_users f on e.system_user_id=f.id
+where action = 'bootstrapSession' 
+and a.site_id=96 AND C.project_id IN (1682,2348,1961,2371)
+and date(a.created_at)=current_date
+)
+
+select 
+a.site_id as site_id_all,
+a.top_level_project_name,
+a.project_id as project_id_all,
+b.*
+from project_hierarchy a
+left join details b on a.project_id=b.project_id and a.site_id=b.site_id
+where a.site_id=96 
+and a.project_id in (1682,2348,1961,2371)
