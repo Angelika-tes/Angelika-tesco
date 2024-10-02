@@ -1,0 +1,25 @@
+SELECT current_date-1 as max_date,
+f.id AS project_id,
+    f.name AS project_name,
+    d.id AS workbook_id,
+    d.name AS workbook_name,
+    h.id AS view_id,
+    h.name AS view_name,
+a.created_at::date AS view_timestamp,
+    a.created_at::date AS view_date,
+    i.id AS view_user_id,
+    k.name AS view_sam_account_name
+   FROM historical_events a
+     LEFT JOIN historical_event_types b ON a.historical_event_type_id = b.type_id
+     LEFT JOIN hist_workbooks c ON a.hist_workbook_id = c.id
+     LEFT JOIN workbooks d ON c.workbook_id = d.id
+     LEFT JOIN projects_contents e ON d.id = e.content_id AND d.site_id = e.site_id AND e.content_type::text = 'workbook'::text
+     LEFT JOIN projects f ON e.project_id = f.id
+     LEFT JOIN hist_views g ON a.hist_view_id = g.id
+     LEFT JOIN views h ON g.view_id = h.id
+     LEFT JOIN hist_users i ON a.hist_actor_user_id = i.id
+     LEFT JOIN users j ON i.user_id = j.id
+     LEFT JOIN system_users k ON j.system_user_id = k.id
+  WHERE b.name::text = 'Access View'::text and date_trunc('month', CURRENT_DATE) - INTERVAL '1 year'<a.created_at::date and a.created_at::date<>CURRENT_DATE
+
+and f.id in (1682,2348,1961,2371)
