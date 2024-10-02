@@ -1,0 +1,226 @@
+WITH RECURSIVE project_hierarchy AS (
+    SELECT
+        p.site_id                       AS site_id ,
+        s.name                          AS site_name ,
+        p.name                          AS project_name ,
+        p.id                            AS project_id ,
+        p.parent_project_id ,
+        CAST(NULL as varchar)           AS parent_project_name ,
+        0                               AS project_level ,
+        p.name                          AS top_level_project_name ,
+        p.id                            AS top_level_project_id 
+
+    FROM public.projects p
+        LEFT JOIN public.users u
+            ON p.owner_id = u.id
+        LEFT JOIN public.system_users su
+            ON u.system_user_id = su.id
+        LEFT JOIN public.sites s on p.site_id = s.id 
+    WHERE p.parent_project_id is null and  p.site_id=96
+    UNION ALL
+    SELECT
+        p.site_id                       AS site_id ,
+        s.name                          AS site_name ,
+        p.name                          AS project_name ,
+        p.id                            AS project_id ,
+        p.parent_project_id ,
+        ph.project_name                 AS parent_project_name ,
+        ph.project_level + 1            AS project_level ,
+        ph.top_level_project_name            AS top_level_project_name ,
+        ph.top_level_project_id           AS top_level_project_id 
+    FROM public.projects p
+        LEFT JOIN public.users u
+            ON p.owner_id = u.id
+        LEFT JOIN public.system_users su
+            ON u.system_user_id = su.id
+        LEFT JOIN public.sites s on p.site_id=s.id
+        INNER JOIN project_hierarchy ph
+            ON ph.project_id = p.parent_project_id 
+),
+
+
+datasources AS (
+        SELECT '1'::text AS table_name,
+           a.site_id,
+           a.name,
+           a.repository_url,
+           b.datasource_id,
+           a.id AS published_datasource_id,
+           a.connectable AS published,
+           c.parent_workbook_id AS workbook_id
+          FROM public.datasources a
+            LEFT JOIN public.data_connections b ON a.repository_url::text = b.dbname::text 
+            LEFT JOIN public.datasources c on b.datasource_id=c.id 
+         WHERE a.connectable is true 
+           UNION ALL
+        SELECT '2'::text AS table_name,
+           datasources.site_id,
+           datasources.name,
+           datasources.repository_url,
+           datasources.id AS datasource_id,
+           NULL::integer AS published_datasource_id,
+           datasources.connectable AS published,
+           datasources.parent_workbook_id AS workbook_id
+          FROM public.datasources
+         WHERE public.datasources.connectable is false
+       ),
+        
+       deduping_datasources AS (
+        SELECT datasources.site_id,
+           datasources.name,
+           datasources.repository_url,
+           datasources.datasource_id,
+           datasources.published_datasource_id,
+           datasources.published,
+           datasources.workbook_id,
+           case when datasources.workbook_id is null then 1 else 
+           row_number() OVER (PARTITION BY datasources.site_id, datasources.datasource_id, datasources.workbook_id ORDER BY datasources.table_name asc) end AS keep
+          FROM datasources
+       ),
+    
+all_datasources as (   
+        
+SELECT a.site_id,
+   a.name,
+   a.repository_url,
+   coalesce(b.project_id,c.project_id) as project_id,   
+   a.published_datasource_id,
+   a.datasource_id,
+   a.published,
+   a.workbook_id
+  FROM deduping_datasources a
+  left join public.projects_contents b on a.datasource_id=content_id and a.site_id=b.site_id and b.content_type = 'datasource'
+  left join public.projects_contents c on a.published_datasource_id=c.content_id and a.site_id=c.site_id and c.content_type = 'datasource'
+ WHERE a.keep = 1  
+ 
+),
+
+
+job_details as (
+select
+a.id,
+a.site_id,
+
+'Refresh Extracts' as type, 
+a.job_name as sub_type,
+CASE
+WHEN a.finish_code = 0 THEN 'Success'::text
+WHEN a.finish_code = 1 THEN 'Failure'::text
+WHEN a.finish_code = 2 THEN 'Cancelled'::text
+ELSE NULL::text
+END AS finish_status,
+ 
+a.created_at as created_at_datetime,
+a.started_at as started_at_datetime,
+a.completed_at as completed_at_datetime, 
+ 
+a.creator_id as user_id,
+NULL as sam_account_name,
+ 
+case 
+when LENGTH(SPLIT_PART(SPLIT_PART(a.args::text,'Workbook',2),'- ',2)) > 0 
+then NULLIF(regexp_replace(SPLIT_PART(SPLIT_PART(a.args::text,'Workbook',2),'- ',2), '\D','','g'), '')
+end::int as workbook_id,
+'' as workbook_name,
+NULL as workbook_project_id, 
+ 
+NULL as dashboard_id,
+'' as dashboard_name, 
+ 
+case 
+when LENGTH(SPLIT_PART(SPLIT_PART(a.args::text,'Datasource',2),'- ',2)) > 0 
+then NULLIF(regexp_replace(SPLIT_PART(SPLIT_PART(a.args::text,'Datasource',2),'- ',2), '\D','','g'), '')
+end::int as datasource_id,
+'' as datasource_name,
+NULL as datasource_project_id,
+ 
+CASE
+WHEN a.progress = 100 THEN 'Complete'::text
+ELSE ''::text
+END AS progress,
+a.created_at,
+a.started_at,
+a.completed_at,
+
+a.run_now
+ 
+from public.background_jobs a
+LEFT JOIN public.tasks b ON a.correlation_id = b.id
+where a.job_name in ('Increment Extracts','Refresh Extracts')
+),
+
+extracts as (
+select
+a.id,
+a.site_id,
+
+type,
+sub_type,
+
+created_at_datetime,
+started_at_datetime,
+completed_at_datetime,
+ 
+finish_status,
+
+user_id,
+sam_account_name,
+
+coalesce(a.workbook_id, e.workbook_id) as workbook_id,
+coalesce(b.name, f.name) as workbook_name,
+coalesce(h.project_id, i.project_id) as workbook_project_id,
+
+dashboard_id,
+dashboard_name,
+
+coalesce(a.datasource_id, d.datasource_id) as datasource_id,
+coalesce(c.name, g.name) as datasource_name,
+coalesce(j.project_id, k.project_id) as datasource_project_id,
+
+run_now
+from job_details a
+left join public.workbooks b on a.workbook_id=b.id and a.site_id=b.site_id 
+left join public.datasources c on a.datasource_id=c.id and a.site_id=c.site_id 
+left join all_datasources d on a.workbook_id = d.workbook_id and a.site_id=d.site_id
+left join all_datasources e on a.datasource_id = e.published_datasource_id and a.site_id=e.site_id
+left join public.workbooks f on e.workbook_id=f.id and e.site_id=f.site_id 
+left join public.datasources g on d.datasource_id=g.id and d.site_id=g.site_id
+left join public.projects_contents h on a.workbook_id=h.content_id and a.site_id=h.site_id and h.content_type = 'workbook'
+left join public.projects_contents i on e.workbook_id=i.content_id and e.site_id=i.site_id and i.content_type = 'workbook'
+left join public.projects_contents j on a.datasource_id=j.content_id and a.site_id=j.site_id and j.content_type = 'datasource'
+left join public.projects_contents k on d.datasource_id=k.content_id and d.site_id=k.site_id and k.content_type = 'datasource'
+)
+
+
+select 
+a.top_level_project_name,
+a.project_id as project_id_all,
+
+
+
+to_timestamp(extract(epoch from b.created_at_datetime::timestamp) + 3600) as created_at_datetime,
+to_timestamp(extract(epoch from b.started_at_datetime::timestamp) + 3600) as started_at_datetime,
+to_timestamp(extract(epoch from b.completed_at_datetime::timestamp) + 3600) as completed_at_datetime,
+
+cast(to_timestamp(extract(epoch from b.created_at_datetime::timestamp) + 3600) as date) as created_at_date,
+cast(to_timestamp(extract(epoch from b.started_at_datetime::timestamp) + 3600) as date) as started_at_date,
+cast(to_timestamp(extract(epoch from b.completed_at_datetime::timestamp) + 3600) as date) as completed_at_date,
+
+b.id,
+b.type,
+b.sub_type,
+case when b.finish_status = 'Success' then false else true end::boolean as is_failure,
+b.workbook_id,
+b.workbook_name,
+b.workbook_project_id,
+b.dashboard_id,
+b.dashboard_name,
+b.datasource_id,
+b.datasource_name,
+b.datasource_project_id,
+b.run_now
+from project_hierarchy a
+left join extracts b on a.project_id=b.workbook_project_id and a.site_id=b.site_id
+where a.site_id = 96
+and a.project_id in (1682,2348,1961,2371)
+and date(b.created_at_datetime)<>current_date
